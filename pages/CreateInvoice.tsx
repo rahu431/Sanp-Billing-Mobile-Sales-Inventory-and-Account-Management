@@ -1,8 +1,16 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useStore } from '../store';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { LineItem, Invoice, Product } from '../types';
-import { parseInvoiceFromText } from '../services/geminiService';
+import { parseInvoiceFromText, processVoiceCommand } from '../services/geminiService';
+
+// Speech Recognition Type Augmentation
+declare global {
+  interface Window {
+    SpeechRecognition: any;
+    webkitSpeechRecognition: any;
+  }
+}
 
 const CreateInvoice: React.FC = () => {
   const { addInvoice, profile, invoices, products } = useStore();
@@ -13,6 +21,10 @@ const CreateInvoice: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [aiInput, setAiInput] = useState('');
   const [showProductModal, setShowProductModal] = useState(false);
+
+  // Voice State
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
 
   // Form State
   const [customerName, setCustomerName] = useState('');
@@ -25,6 +37,31 @@ const CreateInvoice: React.FC = () => {
   const [shipping, setShipping] = useState<number>(0);
   const [handling, setHandling] = useState<number>(profile.defaultHandling || 0);
   const [packaging, setPackaging] = useState<number>(profile.defaultPackaging || 0);
+
+  useEffect(() => {
+    // Initialize Speech Recognition
+    if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = false;
+      recognitionRef.current.interimResults = false;
+
+      recognitionRef.current.onresult = async (event: any) => {
+        const transcript = event.results[0][0].transcript;
+        setIsListening(false);
+        await handleVoiceCommand(transcript);
+      };
+
+      recognitionRef.current.onerror = (event: any) => {
+        console.error("Speech recognition error", event.error);
+        setIsListening(false);
+      };
+      
+      recognitionRef.current.onend = () => {
+        setIsListening(false);
+      };
+    }
+  }, [products, items]); // Re-bind if necessary
 
   const generateInvoiceNumber = () => {
     return `INV-${(invoices.length + 1).toString().padStart(4, '0')}`;
@@ -41,6 +78,83 @@ const CreateInvoice: React.FC = () => {
       setMode('manual');
     }
     setLoading(false);
+  };
+
+  const handleVoiceCommand = async (transcript: string) => {
+    setLoading(true);
+    // Switch to manual mode if in AI mode to see the list update
+    if (mode === 'ai') setMode('manual');
+
+    const actions = await processVoiceCommand(transcript, products);
+    
+    setItems(prevItems => {
+      let newItems = [...prevItems];
+      
+      // Clean up empty initial row if it exists
+      if (newItems.length === 1 && !newItems[0].description) {
+        newItems = [];
+      }
+
+      actions.forEach(action => {
+        // Try to find existing item in cart by ID (if matched) or Description (fuzzy)
+        const existingIndex = newItems.findIndex(item => 
+          (action.productId && item.productId === action.productId) || 
+          item.description.toLowerCase() === action.description.toLowerCase()
+        );
+
+        if (action.action === 'add') {
+          if (existingIndex >= 0) {
+            // Update quantity
+            newItems[existingIndex] = {
+              ...newItems[existingIndex],
+              quantity: newItems[existingIndex].quantity + action.quantity
+            };
+          } else {
+            // Add new line item
+            newItems.push({
+              id: Math.random().toString(),
+              productId: action.productId,
+              description: action.description,
+              quantity: action.quantity,
+              price: action.price || 0
+            });
+          }
+        } else if (action.action === 'remove') {
+           if (existingIndex >= 0) {
+             const currentQty = newItems[existingIndex].quantity;
+             const newQty = currentQty - action.quantity;
+             if (newQty <= 0) {
+               // Remove item completely
+               newItems.splice(existingIndex, 1);
+             } else {
+               // Decrement
+               newItems[existingIndex] = {
+                 ...newItems[existingIndex],
+                 quantity: newQty
+               };
+             }
+           }
+        }
+      });
+      
+      // If cart empty after operations, add placeholder
+      if (newItems.length === 0) {
+         newItems.push({ id: Math.random().toString(), description: '', quantity: 1, price: 0 });
+      }
+
+      return newItems;
+    });
+
+    setLoading(false);
+  };
+
+  const toggleListening = () => {
+    if (isListening) {
+      recognitionRef.current?.stop();
+    } else {
+      recognitionRef.current?.start();
+      setIsListening(true);
+    }
   };
 
   const updateItem = (id: string, field: keyof LineItem, value: any) => {
@@ -152,7 +266,36 @@ const CreateInvoice: React.FC = () => {
           </button>
         </div>
       ) : (
-        <div className="space-y-6 animate-fade-in">
+        <div className="space-y-6 animate-fade-in relative">
+          
+          {/* Voice Command Floating Button (Only in Manual Mode) */}
+          <div className="fixed bottom-24 right-6 z-40">
+            <button
+              onClick={toggleListening}
+              className={`p-4 rounded-full shadow-xl transition-all flex items-center justify-center ${
+                isListening 
+                  ? 'bg-red-500 text-white animate-pulse scale-110' 
+                  : 'bg-indigo-600 text-white hover:bg-indigo-700'
+              }`}
+            >
+               {isListening ? (
+                 <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+               ) : (
+                 <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+               )}
+            </button>
+            {isListening && (
+              <div className="absolute -top-12 left-1/2 -translate-x-1/2 whitespace-nowrap bg-slate-900 text-white text-xs px-3 py-1 rounded-full">
+                Listening...
+              </div>
+            )}
+            {loading && !isListening && (
+               <div className="absolute -top-12 left-1/2 -translate-x-1/2 whitespace-nowrap bg-indigo-900 text-white text-xs px-3 py-1 rounded-full flex gap-2">
+                 <span className="animate-spin">⟳</span> Processing...
+               </div>
+            )}
+          </div>
+
           <div className="space-y-2">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Customer</label>
             <input 
@@ -176,7 +319,7 @@ const CreateInvoice: React.FC = () => {
                   placeholder="Item description"
                   value={item.description}
                   onChange={(e) => updateItem(item.id, 'description', e.target.value)}
-                  className="w-full font-medium text-slate-900 placeholder-slate-300 mb-3 focus:outline-none"
+                  className="w-full font-medium bg-white text-slate-900 placeholder-slate-300 mb-3 focus:outline-none"
                 />
                 <div className="flex gap-4">
                   <div className="flex-1">
@@ -185,7 +328,7 @@ const CreateInvoice: React.FC = () => {
                       type="number"
                       value={item.quantity}
                       onChange={(e) => updateItem(item.id, 'quantity', parseFloat(e.target.value) || 0)}
-                      className="w-full bg-slate-50 p-2 rounded-lg text-sm"
+                      className="w-full bg-white border border-slate-200 p-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     />
                   </div>
                   <div className="flex-1">
@@ -196,7 +339,7 @@ const CreateInvoice: React.FC = () => {
                         type="number"
                         value={item.price}
                         onChange={(e) => updateItem(item.id, 'price', parseFloat(e.target.value) || 0)}
-                        className="w-full bg-slate-50 p-2 pl-6 rounded-lg text-sm"
+                        className="w-full bg-white border border-slate-200 p-2 pl-6 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                       />
                     </div>
                   </div>
@@ -238,7 +381,7 @@ const CreateInvoice: React.FC = () => {
                    type="number" 
                    value={discount} 
                    onChange={e => setDiscount(parseFloat(e.target.value) || 0)}
-                   className="w-20 text-right p-1 bg-slate-50 rounded border border-slate-200"
+                   className="w-20 text-right p-1 bg-white rounded border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                 />
              </div>
 
@@ -248,7 +391,7 @@ const CreateInvoice: React.FC = () => {
                    type="number" 
                    value={taxRate} 
                    onChange={e => setTaxRate(parseFloat(e.target.value) || 0)}
-                   className="w-20 text-right p-1 bg-slate-50 rounded border border-slate-200"
+                   className="w-20 text-right p-1 bg-white rounded border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                 />
              </div>
 
@@ -258,7 +401,7 @@ const CreateInvoice: React.FC = () => {
                    type="number" 
                    value={shipping} 
                    onChange={e => setShipping(parseFloat(e.target.value) || 0)}
-                   className="w-20 text-right p-1 bg-slate-50 rounded border border-slate-200"
+                   className="w-20 text-right p-1 bg-white rounded border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                 />
              </div>
              
@@ -268,7 +411,7 @@ const CreateInvoice: React.FC = () => {
                    type="number" 
                    value={handling} 
                    onChange={e => setHandling(parseFloat(e.target.value) || 0)}
-                   className="w-20 text-right p-1 bg-slate-50 rounded border border-slate-200"
+                   className="w-20 text-right p-1 bg-white rounded border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                 />
              </div>
 
@@ -278,7 +421,7 @@ const CreateInvoice: React.FC = () => {
                    type="number" 
                    value={packaging} 
                    onChange={e => setPackaging(parseFloat(e.target.value) || 0)}
-                   className="w-20 text-right p-1 bg-slate-50 rounded border border-slate-200"
+                   className="w-20 text-right p-1 bg-white rounded border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                 />
              </div>
 

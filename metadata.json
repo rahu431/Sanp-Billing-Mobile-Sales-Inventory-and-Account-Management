@@ -1,5 +1,7 @@
 {
   "name": "SnapBill",
   "description": "A smart, mobile-first billing application leveraging AI to simplify invoice creation and sharing.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [
+    "microphone"
+  ]
 }
